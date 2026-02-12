@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import logging
 import re
 import tempfile
@@ -51,6 +50,7 @@ class AdminBot:
                 [InlineKeyboardButton("📊 Статистика", callback_data="stats"), InlineKeyboardButton("🔄 Обновить", callback_data="refresh")],
                 [InlineKeyboardButton("🌍 Страны", callback_data="countries"), InlineKeyboardButton("🧭 Топ-20", callback_data="top")],
                 [InlineKeyboardButton("📥 Очередь GitHub", callback_data="queue"), InlineKeyboardButton("📤 Export XLSX", callback_data="export")],
+                [InlineKeyboardButton("🏆 Best Global", callback_data="best_global"), InlineKeyboardButton("🏳️ Best Top Country", callback_data="best_top_country")],
             ]
         )
 
@@ -96,6 +96,31 @@ class AdminBot:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
             return
         await update.effective_message.reply_html(self._render_stats(), reply_markup=self._menu())
+
+
+    async def best_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update.effective_user.id if update.effective_user else None):
+            return
+        country = (context.args[0].upper() if context.args else "").strip()
+        if country:
+            rows = self.storage.top_alive(limit=1, countries=[country])
+            if not rows:
+                await update.effective_message.reply_text(f"Нет живых прокси для страны {country}.")
+                return
+            r = rows[0]
+            await update.effective_message.reply_text(
+                f"🏳️ Best {country}: {r.proxy_type}://{r.host}:{r.port} score={r.score:.1f} latency={r.latency_ms}"
+            )
+            return
+
+        rows = self.storage.top_alive(limit=1)
+        if not rows:
+            await update.effective_message.reply_text("Нет живых прокси в базе.")
+            return
+        r = rows[0]
+        await update.effective_message.reply_text(
+            f"🏆 Best Global: {r.proxy_type}://{r.host}:{r.port} [{r.country or '??'}] score={r.score:.1f} latency={r.latency_ms}"
+        )
 
     async def export_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
@@ -159,6 +184,25 @@ class AdminBot:
             await self._safe_edit_text(query, "🧭 Топ-20 живых:\n" + ("\n".join(lines) or "Нет данных"))
         elif data == "export":
             await self._send_export(query.message)
+        elif data == "best_global":
+            rows = self.storage.top_alive(limit=1)
+            if not rows:
+                await self._safe_edit_text(query, "Нет живых прокси в базе.")
+            else:
+                r = rows[0]
+                await self._safe_edit_text(query, f"🏆 Best Global:\n{r.proxy_type}://{r.host}:{r.port} [{r.country or '??'}] score={r.score:.1f} latency={r.latency_ms}")
+        elif data == "best_top_country":
+            stats = self.storage.dashboard_stats()
+            top_country = stats["countries_top"][0]["country"] if stats["countries_top"] else None
+            if not top_country:
+                await self._safe_edit_text(query, "Нет данных по странам.")
+            else:
+                rows = self.storage.top_alive(limit=1, countries=[top_country])
+                if not rows:
+                    await self._safe_edit_text(query, f"Нет живых прокси для страны {top_country}.")
+                else:
+                    r = rows[0]
+                    await self._safe_edit_text(query, f"🏳️ Best {top_country}:\n{r.proxy_type}://{r.host}:{r.port} score={r.score:.1f} latency={r.latency_ms}")
 
     def _build_export_xlsx(self) -> Path:
         rows = self.storage.top_alive(limit=50000)
@@ -212,6 +256,7 @@ def run_bot(settings: Settings) -> None:
     app = Application.builder().token(settings.telegram_bot_token).build()
     app.add_handler(CommandHandler("start", bot.start_cmd))
     app.add_handler(CommandHandler("stats", bot.stats_cmd))
+    app.add_handler(CommandHandler("best", bot.best_cmd))
     app.add_handler(CommandHandler("export", bot.export_cmd))
     app.add_handler(CommandHandler("addrepo", bot.addrepo_cmd))
     app.add_handler(CallbackQueryHandler(bot.callback_handler))

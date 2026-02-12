@@ -28,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Proxy intelligence pipeline")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("run-once", help="Run one collection cycle")
+    sub.add_parser("run-test", help="Run fast test cycle (up to N protocol repos)")
     sub.add_parser("daemon", help="Run continuously with scheduler")
     sub.add_parser("run-bot", help="Run Telegram admin bot")
     return parser
@@ -44,6 +45,10 @@ def main() -> None:
         if args.cmd == "run-once":
             stats = run_once_sync(settings)
             logger.info("Run finished: %s", stats)
+            print(json.dumps(stats, ensure_ascii=False, indent=2))
+        elif args.cmd == "run-test":
+            stats = run_once_sync(settings, test_mode=True)
+            logger.info("Test run finished: %s", stats)
             print(json.dumps(stats, ensure_ascii=False, indent=2))
         elif args.cmd == "daemon":
             run_daemon(settings)

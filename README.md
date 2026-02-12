@@ -76,6 +76,8 @@ GITHUB_CODE_PAGES=5
 GITHUB_REPO_PAGES=5
 GITHUB_PER_PAGE=50
 GITHUB_MAX_BLOB_BYTES=250000
+GITHUB_MAX_FILES_PER_QUERY=80
+GITHUB_TEST_CYCLE_REPOS=4
 SOURCE_URLS=
 CHECK_TIMEOUT_SEC=4
 MAX_CONCURRENT_CHECKS=100
@@ -105,6 +107,7 @@ LOG_LEVEL=INFO
 
 ```bash
 python -m app.main run-once
+python -m app.main run-test
 ```
 
 Ожидаемо увидите JSON-статистику вида:
@@ -112,6 +115,14 @@ python -m app.main run-once
 - `candidates`
 - `saved`
 - `alive`
+
+## 5.1) Быстрый тестовый цикл (до 4 repo по разным протоколам)
+
+```bash
+python -m app.main run-test
+```
+
+Этот режим берёт ограниченный набор репозиториев (по умолчанию до `GITHUB_TEST_CYCLE_REPOS=4`) и быстрее показывает, что парсинг работает.
 
 ## 6) Запуск в постоянном режиме (daemon)
 
@@ -143,6 +154,7 @@ python -m app.main run-bot
    - Топ-20
    - Очередь GitHub
    - Export XLSX (скачать базу alive-прокси в Excel)
+   - Best Global / Best Top Country
 
 Добавление репозитория в очередь:
 - командой: `/addrepo https://github.com/owner/repo`
@@ -151,6 +163,10 @@ python -m app.main run-bot
 Экспорт базы в Excel:
 - кнопка `Export XLSX` в меню
 - или команда `/export`
+
+Лучший сервер:
+- `/best` — лучший глобально
+- `/best RU` — лучший для страны
 
 Если репозиторий уже был:
 - бот ответит, что он уже в очереди или уже анализировался.
@@ -167,12 +183,14 @@ python -m app.main run-bot
 # Linux/macOS
 export LOG_LEVEL=DEBUG
 python -m app.main run-once
+python -m app.main run-test
 ```
 
 ```powershell
 # Windows PowerShell
 $env:LOG_LEVEL = "DEBUG"
 python -m app.main run-once
+python -m app.main run-test
 ```
 
 ## 8) Полезные команды проверки

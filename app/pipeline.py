@@ -29,8 +29,8 @@ class Pipeline:
         self.storage = Storage(settings.db_url)
         self.storage.init_db()
 
-    async def run_once(self) -> dict[str, int]:
-        logger.info("Pipeline cycle started")
+    async def run_once(self, test_mode: bool = False) -> dict[str, int]:
+        logger.info("Pipeline cycle started (test_mode=%s)", test_mode)
         queued_repos = self.storage.get_pending_repos(limit=100)
         logger.info("Queued repos fetched: %s", len(queued_repos))
         for repo in queued_repos:
@@ -45,6 +45,9 @@ class Pipeline:
                 per_page=self.settings.github_per_page,
                 max_blob_bytes=self.settings.github_max_blob_bytes,
                 extra_repos=queued_repos,
+                max_files_per_query=self.settings.github_max_files_per_query,
+                test_mode=test_mode,
+                test_cycle_repos=self.settings.github_test_cycle_repos,
             ),
             URLListCollector(self.settings.source_urls),
         ]
@@ -112,5 +115,5 @@ class Pipeline:
         return stats
 
 
-def run_once_sync(settings: Settings) -> dict[str, int]:
-    return asyncio.run(Pipeline(settings).run_once())
+def run_once_sync(settings: Settings, test_mode: bool = False) -> dict[str, int]:
+    return asyncio.run(Pipeline(settings).run_once(test_mode=test_mode))
