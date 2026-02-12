@@ -1,3 +1,7 @@
+import pytest
+
+pytest.importorskip("telegram")
+
 from app.bot import REPO_RE
 
 

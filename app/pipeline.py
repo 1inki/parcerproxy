@@ -45,8 +45,12 @@ class Pipeline:
         ]
 
         raws: list[tuple[str, str]] = []
+        collect_error = False
         for collector in collectors:
-            raws.extend(await collector.collect())
+            try:
+                raws.extend(await collector.collect())
+            except Exception:
+                collect_error = True
 
         candidates: list[ProxyCandidate] = []
         for source, text in raws:
@@ -79,8 +83,9 @@ class Pipeline:
             if item.is_alive:
                 alive += 1
 
+        final_status = "failed" if collect_error else "done"
         for repo in queued_repos:
-            self.storage.mark_repo_status(repo, "done")
+            self.storage.mark_repo_status(repo, final_status)
 
         stats = {
             "raw_sources": len(raws),

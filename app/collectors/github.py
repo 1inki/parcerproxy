@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import re
+
 import httpx
 
 from app.collectors.base import Collector
@@ -29,6 +31,20 @@ class GitHubCodeCollector(Collector):
         self.max_blob_bytes = max_blob_bytes
         self.extra_repos = extra_repos or []
 
+    async def _get_json(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        params: dict | None = None,
+    ) -> dict | None:
+        try:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                return None
+            return resp.json()
+        except (httpx.HTTPError, ValueError, asyncio.TimeoutError):
+            return None
+
     async def collect(self) -> list[tuple[str, str]]:
         if not self.token:
             return []
@@ -41,17 +57,18 @@ class GitHubCodeCollector(Collector):
 
         out: list[tuple[str, str]] = []
         seen_sources: set[str] = set()
-        async with httpx.AsyncClient(timeout=20, headers=headers) as client:
-            # 1) Deep code-search pagination by keywords.
+        timeout = httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=20.0)
+        async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as client:
             for q in self.queries:
                 for page in range(1, self.code_pages + 1):
-                    search = await client.get(
+                    payload = await self._get_json(
+                        client,
                         "https://api.github.com/search/code",
                         params={"q": f"{q} in:file", "per_page": self.per_page, "page": page},
                     )
-                    if search.status_code != 200:
+                    if not payload:
                         break
-                    items = search.json().get("items", [])
+                    items = payload.get("items", [])
                     if not items:
                         break
                     for item in items:
@@ -59,10 +76,10 @@ class GitHubCodeCollector(Collector):
                         source = item.get("html_url", "github")
                         if not url or source in seen_sources:
                             continue
-                        file_resp = await client.get(url)
-                        if file_resp.status_code != 200:
+                        file_payload = await self._get_json(client, url)
+                        if not file_payload:
                             continue
-                        content = file_resp.json().get("content", "")
+                        content = file_payload.get("content", "")
                         if not content:
                             continue
                         try:
@@ -72,11 +89,11 @@ class GitHubCodeCollector(Collector):
                         seen_sources.add(source)
                         out.append((source, decoded))
 
-            # 2) Repo discovery by keywords + README parsing for breadth.
             discovered_repos: set[str] = set(self.extra_repos)
             for q in self.queries:
                 for page in range(1, self.repo_pages + 1):
-                    resp = await client.get(
+                    payload = await self._get_json(
+                        client,
                         "https://api.github.com/search/repositories",
                         params={
                             "q": q,
@@ -86,14 +103,13 @@ class GitHubCodeCollector(Collector):
                             "page": page,
                         },
                     )
-                    if resp.status_code != 200:
+                    if not payload:
                         break
-                    items = resp.json().get("items", [])
+                    items = payload.get("items", [])
                     if not items:
                         break
                     discovered_repos.update(item.get("full_name", "").lower() for item in items if item.get("full_name"))
 
-            # 3) Focused deep scan of discovered repos via git tree and selected blobs.
             for repo in discovered_repos:
                 await self._collect_repo_content(client, repo, out, seen_sources)
 
@@ -106,14 +122,14 @@ class GitHubCodeCollector(Collector):
         out: list[tuple[str, str]],
         seen_sources: set[str],
     ) -> None:
-        repo_meta = await client.get(f"https://api.github.com/repos/{repo}")
-        if repo_meta.status_code != 200:
+        repo_meta = await self._get_json(client, f"https://api.github.com/repos/{repo}")
+        if not repo_meta:
             return
-        default_branch = repo_meta.json().get("default_branch", "main")
+        default_branch = repo_meta.get("default_branch", "main")
 
-        readme = await client.get(f"https://api.github.com/repos/{repo}/readme")
-        if readme.status_code == 200:
-            content = readme.json().get("content", "")
+        readme = await self._get_json(client, f"https://api.github.com/repos/{repo}/readme")
+        if readme:
+            content = readme.get("content", "")
             if content:
                 try:
                     decoded = base64.b64decode(content).decode("utf-8", errors="ignore")
@@ -124,13 +140,18 @@ class GitHubCodeCollector(Collector):
                 except Exception:
                     pass
 
-        tree = await client.get(f"https://api.github.com/repos/{repo}/git/trees/{default_branch}", params={"recursive": 1})
-        if tree.status_code != 200:
+        tree = await self._get_json(
+            client,
+            f"https://api.github.com/repos/{repo}/git/trees/{default_branch}",
+            params={"recursive": 1},
+        )
+        if not tree:
             return
 
-        entries = tree.json().get("tree", [])
+        entries = tree.get("tree", [])
         candidates = [
-            e for e in entries
+            e
+            for e in entries
             if e.get("type") == "blob"
             and e.get("size", 0) <= self.max_blob_bytes
             and (TEXT_EXT_RE.search(e.get("path", "")) or "proxy" in e.get("path", "").lower())
@@ -141,11 +162,8 @@ class GitHubCodeCollector(Collector):
             path = blob.get("path", "")
             if not sha:
                 continue
-            blob_resp = await client.get(f"https://api.github.com/repos/{repo}/git/blobs/{sha}")
-            if blob_resp.status_code != 200:
-                continue
-            payload = blob_resp.json()
-            if payload.get("encoding") != "base64":
+            payload = await self._get_json(client, f"https://api.github.com/repos/{repo}/git/blobs/{sha}")
+            if not payload or payload.get("encoding") != "base64":
                 continue
             try:
                 decoded = base64.b64decode(payload.get("content", "")).decode("utf-8", errors="ignore")

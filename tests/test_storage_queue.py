@@ -1,3 +1,7 @@
+import pytest
+
+pytest.importorskip("sqlalchemy")
+
 from app.storage import Storage
 
 

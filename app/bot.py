@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import logging
 import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.config import Settings
 from app.storage import Storage
 
 REPO_RE = re.compile(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
+logger = logging.getLogger(__name__)
+
+
+def _is_not_modified_error(exc: Exception) -> bool:
+    return isinstance(exc, BadRequest) and "Message is not modified" in str(exc)
 
 
 class AdminBot:
@@ -42,6 +49,20 @@ class AdminBot:
             f"Последний цикл: sources={latest['raw_sources']} candidates={latest['candidates']} saved={latest['saved']} alive={latest['alive']}\n"
             f"Топ стран: {countries}"
         )
+
+    async def _safe_edit_text(
+        self,
+        query,
+        text: str,
+        parse_mode: str | None = None,
+    ) -> None:
+        try:
+            await query.edit_message_text(text, parse_mode=parse_mode, reply_markup=self._menu())
+        except Exception as exc:
+            if _is_not_modified_error(exc):
+                await query.answer("Данные не изменились", show_alert=False)
+                return
+            raise
 
     async def start_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
@@ -96,26 +117,30 @@ class AdminBot:
 
         data = query.data or ""
         if data in {"stats", "refresh"}:
-            await query.edit_message_text(self._render_stats(), parse_mode="HTML", reply_markup=self._menu())
+            await self._safe_edit_text(query, self._render_stats(), parse_mode="HTML")
         elif data == "countries":
             s = self.storage.dashboard_stats()
             text = "\n".join(f"{x['country']}: {x['count']}" for x in s["countries_top"]) or "Нет данных"
-            await query.edit_message_text(f"🌍 Страны (top):\n{text}", reply_markup=self._menu())
+            await self._safe_edit_text(query, f"🌍 Страны (top):\n{text}")
         elif data == "queue":
             q = self.storage.repo_queue_stats()
-            await query.edit_message_text(
+            await self._safe_edit_text(
+                query,
                 f"📥 Очередь\npending: {q['pending']}\nprocessing: {q['processing']}\ndone: {q['done']}\nfailed: {q['failed']}",
-                reply_markup=self._menu(),
             )
         elif data == "top":
             rows = self.storage.top_alive(limit=20)
             lines = [f"{idx+1}. {r.proxy_type}://{r.host}:{r.port} [{r.country or '??'}] score={r.score:.1f}" for idx, r in enumerate(rows)]
-            await query.edit_message_text("🧭 Топ-20 живых:\n" + ("\n".join(lines) or "Нет данных"), reply_markup=self._menu())
+            await self._safe_edit_text(query, "🧭 Топ-20 живых:\n" + ("\n".join(lines) or "Нет данных"))
 
     async def periodic_report(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         if self.settings.telegram_admin_id <= 0:
             return
         await context.bot.send_message(chat_id=self.settings.telegram_admin_id, text=self._render_stats(), parse_mode="HTML", reply_markup=self._menu())
+
+
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Unhandled bot error. update=%s", update, exc_info=context.error)
 
 
 def run_bot(settings: Settings) -> None:
@@ -129,5 +154,6 @@ def run_bot(settings: Settings) -> None:
     app.add_handler(CommandHandler("addrepo", bot.addrepo_cmd))
     app.add_handler(CallbackQueryHandler(bot.callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.text_handler))
+    app.add_error_handler(_on_error)
     app.job_queue.run_repeating(bot.periodic_report, interval=settings.telegram_report_minutes * 60, first=15)
     app.run_polling(close_loop=False)
