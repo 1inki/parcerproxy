@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 
 from app.collectors.github import GitHubCodeCollector
 from app.collectors.url_list import URLListCollector
@@ -10,6 +11,8 @@ from app.geo import country_by_ip
 from app.normalizer import ProxyCandidate, parse_candidates
 from app.storage import Storage
 from app.validator import validate_many
+
+logger = logging.getLogger(__name__)
 
 
 def _is_ip(host: str) -> bool:
@@ -27,7 +30,9 @@ class Pipeline:
         self.storage.init_db()
 
     async def run_once(self) -> dict[str, int]:
+        logger.info("Pipeline cycle started")
         queued_repos = self.storage.get_pending_repos(limit=100)
+        logger.info("Queued repos fetched: %s", len(queued_repos))
         for repo in queued_repos:
             self.storage.mark_repo_status(repo, "processing")
 
@@ -48,15 +53,24 @@ class Pipeline:
         collect_error = False
         for collector in collectors:
             try:
+                logger.info("Running collector: %s", collector.__class__.__name__)
                 raws.extend(await collector.collect())
+            except asyncio.CancelledError:
+                collect_error = True
+                logger.warning("Collector cancelled: %s", collector.__class__.__name__)
             except Exception:
                 collect_error = True
+                logger.exception("Collector failed: %s", collector.__class__.__name__)
+
+        logger.info("Raw documents collected: %s", len(raws))
 
         candidates: list[ProxyCandidate] = []
         for source, text in raws:
             candidates.extend(parse_candidates(text, source=source))
 
+        logger.info("Candidates parsed: %s", len(candidates))
         validated = await validate_many(candidates, self.settings.check_timeout_sec, self.settings.max_concurrent_checks)
+        logger.info("Candidates validated: %s", len(validated))
 
         saved = 0
         alive = 0
@@ -94,6 +108,7 @@ class Pipeline:
             "alive": alive,
         }
         self.storage.record_run(**stats)
+        logger.info("Pipeline cycle finished: %s", stats)
         return stats
 
 

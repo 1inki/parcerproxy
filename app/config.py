@@ -36,5 +36,7 @@ class Settings:
     telegram_admin_id: int = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
     telegram_report_minutes: int = int(os.getenv("TELEGRAM_REPORT_MINUTES", "30"))
 
+    log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
+
 
 settings = Settings()

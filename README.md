@@ -85,6 +85,7 @@ SCHEDULE_MINUTES=15
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_ADMIN_ID=0
 TELEGRAM_REPORT_MINUTES=30
+LOG_LEVEL=INFO
 ```
 
 ### Что обязательно заполнить
@@ -148,6 +149,25 @@ python -m app.main run-bot
 
 Если репозиторий уже был:
 - бот ответит, что он уже в очереди или уже анализировался.
+
+
+## Живые логи при запуске
+
+Теперь при запуске `run-once`, `daemon`, `run-bot` выводятся live-логи в консоль.
+
+Если нужно больше деталей:
+
+```bash
+# Linux/macOS
+export LOG_LEVEL=DEBUG
+python -m app.main run-once
+```
+
+```powershell
+# Windows PowerShell
+$env:LOG_LEVEL = "DEBUG"
+python -m app.main run-once
+```
 
 ## 8) Полезные команды проверки
 

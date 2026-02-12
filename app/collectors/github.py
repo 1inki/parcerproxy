@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import re
 
 import httpx
@@ -10,6 +11,7 @@ from app.collectors.base import Collector
 
 
 TEXT_EXT_RE = re.compile(r"\.(txt|conf|cfg|ini|yaml|yml|json|csv|list|md)$", re.IGNORECASE)
+logger = logging.getLogger(__name__)
 
 
 class GitHubCodeCollector(Collector):
@@ -40,13 +42,19 @@ class GitHubCodeCollector(Collector):
         try:
             resp = await client.get(url, params=params)
             if resp.status_code != 200:
+                logger.debug("GitHub non-200: %s %s", resp.status_code, url)
                 return None
             return resp.json()
-        except (httpx.HTTPError, ValueError, asyncio.TimeoutError):
+        except asyncio.CancelledError:
+            logger.warning("GitHub request cancelled, skipping: %s", url)
+            return None
+        except (httpx.HTTPError, ValueError, asyncio.TimeoutError) as exc:
+            logger.warning("GitHub request failed: %s (%s)", url, exc)
             return None
 
     async def collect(self) -> list[tuple[str, str]]:
         if not self.token:
+            logger.warning("GITHUB_TOKEN is empty, GitHub collector disabled")
             return []
 
         headers = {
@@ -58,8 +66,10 @@ class GitHubCodeCollector(Collector):
         out: list[tuple[str, str]] = []
         seen_sources: set[str] = set()
         timeout = httpx.Timeout(connect=10.0, read=20.0, write=20.0, pool=20.0)
+        logger.info("GitHub collector started: queries=%s", len(self.queries))
         async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as client:
             for q in self.queries:
+                logger.info("GitHub code search query=%s", q)
                 for page in range(1, self.code_pages + 1):
                     payload = await self._get_json(
                         client,
@@ -110,9 +120,11 @@ class GitHubCodeCollector(Collector):
                         break
                     discovered_repos.update(item.get("full_name", "").lower() for item in items if item.get("full_name"))
 
+            logger.info("GitHub repo deep scan count=%s", len(discovered_repos))
             for repo in discovered_repos:
                 await self._collect_repo_content(client, repo, out, seen_sources)
 
+        logger.info("GitHub collector finished: documents=%s", len(out))
         return out
 
     async def _collect_repo_content(
