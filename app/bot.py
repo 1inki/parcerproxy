@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import csv
 import logging
 import re
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
 
+from openpyxl import Workbook
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -12,6 +17,19 @@ from app.storage import Storage
 
 REPO_RE = re.compile(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
 logger = logging.getLogger(__name__)
+
+
+EXPORT_HEADERS = [
+    "type",
+    "host",
+    "port",
+    "country",
+    "latency_ms",
+    "score",
+    "success_rate",
+    "source",
+    "last_checked_at",
+]
 
 
 def _is_not_modified_error(exc: Exception) -> bool:
@@ -32,7 +50,7 @@ class AdminBot:
             [
                 [InlineKeyboardButton("📊 Статистика", callback_data="stats"), InlineKeyboardButton("🔄 Обновить", callback_data="refresh")],
                 [InlineKeyboardButton("🌍 Страны", callback_data="countries"), InlineKeyboardButton("🧭 Топ-20", callback_data="top")],
-                [InlineKeyboardButton("📥 Очередь GitHub", callback_data="queue")],
+                [InlineKeyboardButton("📥 Очередь GitHub", callback_data="queue"), InlineKeyboardButton("📤 Export XLSX", callback_data="export")],
             ]
         )
 
@@ -41,12 +59,14 @@ class AdminBot:
         countries = ", ".join(f"{x['country']}:{x['count']}" for x in s["countries_top"][:8]) or "n/a"
         q = s["queue"]
         latest = s["latest_run"]
+        latest_at = latest["at"] or "n/a"
         return (
             "<b>Proxy Parser Dashboard</b>\n"
-            f"Всего прокси: <b>{s['total_proxies']}</b>\n"
+            f"Всего прокси в БД: <b>{s['total_proxies']}</b>\n"
             f"Живых: <b>{s['alive_proxies']}</b>\n"
+            f"Проверок за 24ч: <b>{s['observations_total']}</b>\n"
             f"Очередь repos — pending:{q['pending']} processing:{q['processing']} done:{q['done']} failed:{q['failed']}\n"
-            f"Последний цикл: sources={latest['raw_sources']} candidates={latest['candidates']} saved={latest['saved']} alive={latest['alive']}\n"
+            f"Последний цикл ({latest_at}): sources={latest['raw_sources']} candidates={latest['candidates']} saved={latest['saved']} alive={latest['alive']}\n"
             f"Топ стран: {countries}"
         )
 
@@ -76,6 +96,11 @@ class AdminBot:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
             return
         await update.effective_message.reply_html(self._render_stats(), reply_markup=self._menu())
+
+    async def export_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update.effective_user.id if update.effective_user else None):
+            return
+        await self._send_export(update.effective_message)
 
     async def addrepo_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
@@ -132,6 +157,42 @@ class AdminBot:
             rows = self.storage.top_alive(limit=20)
             lines = [f"{idx+1}. {r.proxy_type}://{r.host}:{r.port} [{r.country or '??'}] score={r.score:.1f}" for idx, r in enumerate(rows)]
             await self._safe_edit_text(query, "🧭 Топ-20 живых:\n" + ("\n".join(lines) or "Нет данных"))
+        elif data == "export":
+            await self._send_export(query.message)
+
+    def _build_export_xlsx(self) -> Path:
+        rows = self.storage.top_alive(limit=50000)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "proxies"
+        ws.append(EXPORT_HEADERS)
+        for r in rows:
+            ws.append(
+                [
+                    r.proxy_type,
+                    r.host,
+                    r.port,
+                    r.country,
+                    r.latency_ms,
+                    round(r.score, 3),
+                    round(r.success_rate, 4),
+                    r.source,
+                    r.last_checked_at.isoformat() if r.last_checked_at else None,
+                ]
+            )
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        path = Path(tempfile.gettempdir()) / f"proxy_export_{stamp}.xlsx"
+        wb.save(path)
+        return path
+
+    async def _send_export(self, message) -> None:
+        await message.reply_text("Готовлю экспорт базы в Excel...")
+        path = self._build_export_xlsx()
+        try:
+            with path.open("rb") as f:
+                await message.reply_document(document=f, filename=path.name, caption="Экспорт базы прокси (alive)")
+        finally:
+            path.unlink(missing_ok=True)
 
     async def periodic_report(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         if self.settings.telegram_admin_id <= 0:
@@ -151,6 +212,7 @@ def run_bot(settings: Settings) -> None:
     app = Application.builder().token(settings.telegram_bot_token).build()
     app.add_handler(CommandHandler("start", bot.start_cmd))
     app.add_handler(CommandHandler("stats", bot.stats_cmd))
+    app.add_handler(CommandHandler("export", bot.export_cmd))
     app.add_handler(CommandHandler("addrepo", bot.addrepo_cmd))
     app.add_handler(CallbackQueryHandler(bot.callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.text_handler))

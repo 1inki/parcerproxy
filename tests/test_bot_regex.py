@@ -1,6 +1,7 @@
 import pytest
 
 pytest.importorskip("telegram")
+pytest.importorskip("openpyxl")
 
 from app.bot import REPO_RE
 

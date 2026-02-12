@@ -20,6 +20,8 @@ def setup_logging(level: str) -> None:
         stream=sys.stdout,
         force=True,
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,14 +40,17 @@ def main() -> None:
 
     logger.info("Starting command: %s", args.cmd)
 
-    if args.cmd == "run-once":
-        stats = run_once_sync(settings)
-        logger.info("Run finished: %s", stats)
-        print(json.dumps(stats, ensure_ascii=False, indent=2))
-    elif args.cmd == "daemon":
-        run_daemon(settings)
-    elif args.cmd == "run-bot":
-        run_bot(settings)
+    try:
+        if args.cmd == "run-once":
+            stats = run_once_sync(settings)
+            logger.info("Run finished: %s", stats)
+            print(json.dumps(stats, ensure_ascii=False, indent=2))
+        elif args.cmd == "daemon":
+            run_daemon(settings)
+        elif args.cmd == "run-bot":
+            run_bot(settings)
+    except KeyboardInterrupt:
+        logger.warning("Interrupted by user (Ctrl+C). Graceful shutdown.")
 
 
 if __name__ == "__main__":

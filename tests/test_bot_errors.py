@@ -1,5 +1,6 @@
 import pytest
 
+pytest.importorskip("openpyxl")
 telegram_error = pytest.importorskip("telegram.error")
 BadRequest = telegram_error.BadRequest
 
