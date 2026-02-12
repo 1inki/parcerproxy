@@ -16,6 +16,13 @@ def _csv_env(name: str) -> list[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(slots=True)
 class Settings:
     db_url: str = os.getenv("DB_URL", "sqlite:///app.db")
@@ -30,6 +37,8 @@ class Settings:
     source_urls: list[str] = field(default_factory=lambda: _csv_env("SOURCE_URLS"))
     check_timeout_sec: float = float(os.getenv("CHECK_TIMEOUT_SEC", "4"))
     max_concurrent_checks: int = int(os.getenv("MAX_CONCURRENT_CHECKS", "100"))
+    max_validate_candidates: int = int(os.getenv("MAX_VALIDATE_CANDIDATES", "2500"))
+    max_validate_candidates_test: int = int(os.getenv("MAX_VALIDATE_CANDIDATES_TEST", "600"))
     country_whitelist: list[str] = field(default_factory=lambda: [x.upper() for x in _csv_env("COUNTRY_WHITELIST")])
     country_blacklist: list[str] = field(default_factory=lambda: [x.upper() for x in _csv_env("COUNTRY_BLACKLIST")])
     schedule_minutes: int = int(os.getenv("SCHEDULE_MINUTES", "15"))
@@ -37,6 +46,7 @@ class Settings:
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_admin_id: int = int(os.getenv("TELEGRAM_ADMIN_ID", "0"))
     telegram_report_minutes: int = int(os.getenv("TELEGRAM_REPORT_MINUTES", "30"))
+    bot_refresh_triggers_sync: bool = _bool_env("BOT_REFRESH_TRIGGERS_SYNC", True)
 
     log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
 

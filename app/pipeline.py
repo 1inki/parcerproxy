@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+from collections import defaultdict
 
 from app.collectors.github import GitHubCodeCollector
 from app.collectors.url_list import URLListCollector
@@ -23,6 +24,46 @@ def _is_ip(host: str) -> bool:
         return False
 
 
+def _stage(title: str) -> str:
+    return f"\033[1m{title}\033[0m"
+
+
+def _prepare_candidates(candidates: list[ProxyCandidate], limit: int) -> list[ProxyCandidate]:
+    seen: set[tuple[str, str, int]] = set()
+    dedup: list[ProxyCandidate] = []
+    for c in candidates:
+        key = (c.proxy_type, c.host, c.port)
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(c)
+
+    by_type: dict[str, list[ProxyCandidate]] = defaultdict(list)
+    for c in dedup:
+        by_type[c.proxy_type].append(c)
+
+    ordered_types = ["socks5", "mtproto", "ss", "http", "https", "socks4"]
+    out: list[ProxyCandidate] = []
+    progress = True
+    i = 0
+    while progress and len(out) < limit:
+        progress = False
+        for t in ordered_types:
+            arr = by_type.get(t, [])
+            if i < len(arr):
+                out.append(arr[i])
+                progress = True
+                if len(out) >= limit:
+                    break
+        i += 1
+
+    if len(out) < limit:
+        leftovers = [c for t, arr in by_type.items() if t not in ordered_types for c in arr]
+        out.extend(leftovers[: max(0, limit - len(out))])
+
+    return out
+
+
 class Pipeline:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -30,7 +71,7 @@ class Pipeline:
         self.storage.init_db()
 
     async def run_once(self, test_mode: bool = False) -> dict[str, int]:
-        logger.info("Pipeline cycle started (test_mode=%s)", test_mode)
+        logger.info("%s cycle started (test_mode=%s)", _stage("ПАРСИНГ:"), test_mode)
         queued_repos = self.storage.get_pending_repos(limit=100)
         logger.info("Queued repos fetched: %s", len(queued_repos))
         for repo in queued_repos:
@@ -67,14 +108,22 @@ class Pipeline:
 
         logger.info("Raw documents collected: %s", len(raws))
 
+        logger.info("%s normalize and dedup candidates", _stage("СОРТИРОВКА:"))
         candidates: list[ProxyCandidate] = []
         for source, text in raws:
             candidates.extend(parse_candidates(text, source=source))
 
-        logger.info("Candidates parsed: %s", len(candidates))
+        pre_count = len(candidates)
+        limit = self.settings.max_validate_candidates_test if test_mode else self.settings.max_validate_candidates
+        candidates = _prepare_candidates(candidates, limit=limit)
+
+        logger.info("Candidates parsed: %s | prepared for validation: %s", pre_count, len(candidates))
+
+        logger.info("%s async validate", _stage("ПРОВЕРКА:"))
         validated = await validate_many(candidates, self.settings.check_timeout_sec, self.settings.max_concurrent_checks)
         logger.info("Candidates validated: %s", len(validated))
 
+        logger.info("%s saving to DB + geo filters", _stage("СОХРАНЕНИЕ:"))
         saved = 0
         alive = 0
         for item in validated:
@@ -106,12 +155,13 @@ class Pipeline:
 
         stats = {
             "raw_sources": len(raws),
-            "candidates": len(candidates),
+            "candidates": pre_count,
+            "validated": len(candidates),
             "saved": saved,
             "alive": alive,
         }
-        self.storage.record_run(**stats)
-        logger.info("Pipeline cycle finished: %s", stats)
+        self.storage.record_run(raw_sources=stats["raw_sources"], candidates=stats["candidates"], saved=stats["saved"], alive=stats["alive"])
+        logger.info("%s cycle finished: %s", _stage("ИТОГ:"), stats)
         return stats
 
 

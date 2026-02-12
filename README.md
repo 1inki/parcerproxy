@@ -81,12 +81,15 @@ GITHUB_TEST_CYCLE_REPOS=4
 SOURCE_URLS=
 CHECK_TIMEOUT_SEC=4
 MAX_CONCURRENT_CHECKS=100
+MAX_VALIDATE_CANDIDATES=2500
+MAX_VALIDATE_CANDIDATES_TEST=600
 COUNTRY_WHITELIST=
 COUNTRY_BLACKLIST=RU,KP,IR
 SCHEDULE_MINUTES=15
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_ADMIN_ID=0
 TELEGRAM_REPORT_MINUTES=30
+BOT_REFRESH_TRIGGERS_SYNC=true
 LOG_LEVEL=INFO
 ```
 
@@ -149,7 +152,7 @@ python -m app.main run-bot
 1. Напишите боту `/start`
 2. Откроется админ-меню:
    - Статистика
-   - Обновить
+   - Обновить+Синк (сразу запускает test-cycle парсера и обновляет статистику)
    - Страны
    - Топ-20
    - Очередь GitHub
@@ -174,7 +177,8 @@ python -m app.main run-bot
 
 ## Живые логи при запуске
 
-Теперь при запуске `run-once`, `daemon`, `run-bot` выводятся live-логи в консоль.
+Теперь при запуске `run-once`, `run-test`, `daemon`, `run-bot` выводятся live-логи в консоль.
+В логах выделены этапы: `ПАРСИНГ:`, `СОРТИРОВКА:`, `ПРОВЕРКА:`, `СОХРАНЕНИЕ:`, `ИТОГ:`.
 Шумные транспортные логи `httpx/httpcore` приглушены до `WARNING`, чтобы не было визуальных лагов в консоли.
 
 Если нужно больше деталей:

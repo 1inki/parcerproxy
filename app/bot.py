@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import tempfile
@@ -12,6 +13,7 @@ from telegram.error import BadRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.config import Settings
+from app.pipeline import run_once_sync
 from app.storage import Storage
 
 REPO_RE = re.compile(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
@@ -47,7 +49,7 @@ class AdminBot:
     def _menu(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("📊 Статистика", callback_data="stats"), InlineKeyboardButton("🔄 Обновить", callback_data="refresh")],
+                [InlineKeyboardButton("📊 Статистика", callback_data="stats"), InlineKeyboardButton("🔄 Обновить+Синк", callback_data="refresh")],
                 [InlineKeyboardButton("🌍 Страны", callback_data="countries"), InlineKeyboardButton("🧭 Топ-20", callback_data="top")],
                 [InlineKeyboardButton("📥 Очередь GitHub", callback_data="queue"), InlineKeyboardButton("📤 Export XLSX", callback_data="export")],
                 [InlineKeyboardButton("🏆 Best Global", callback_data="best_global"), InlineKeyboardButton("🏳️ Best Top Country", callback_data="best_top_country")],
@@ -70,12 +72,7 @@ class AdminBot:
             f"Топ стран: {countries}"
         )
 
-    async def _safe_edit_text(
-        self,
-        query,
-        text: str,
-        parse_mode: str | None = None,
-    ) -> None:
+    async def _safe_edit_text(self, query, text: str, parse_mode: str | None = None) -> None:
         try:
             await query.edit_message_text(text, parse_mode=parse_mode, reply_markup=self._menu())
         except Exception as exc:
@@ -83,6 +80,10 @@ class AdminBot:
                 await query.answer("Данные не изменились", show_alert=False)
                 return
             raise
+
+    async def _sync_now(self, test_mode: bool = True) -> dict[str, int]:
+        logger.info("Bot-triggered sync started (test_mode=%s)", test_mode)
+        return await asyncio.to_thread(run_once_sync, self.settings, test_mode)
 
     async def start_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
@@ -96,7 +97,6 @@ class AdminBot:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
             return
         await update.effective_message.reply_html(self._render_stats(), reply_markup=self._menu())
-
 
     async def best_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
@@ -166,6 +166,12 @@ class AdminBot:
             return
 
         data = query.data or ""
+        if data == "refresh" and self.settings.bot_refresh_triggers_sync:
+            await self._safe_edit_text(query, "⏳ Синхронизация запущена (test-cycle)...")
+            stats = await self._sync_now(test_mode=True)
+            await self._safe_edit_text(query, self._render_stats() + f"\n\n✅ Sync done: validated={stats.get('validated', 0)} saved={stats.get('saved', 0)}", parse_mode="HTML")
+            return
+
         if data in {"stats", "refresh"}:
             await self._safe_edit_text(query, self._render_stats(), parse_mode="HTML")
         elif data == "countries":
