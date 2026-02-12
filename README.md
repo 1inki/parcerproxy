@@ -79,10 +79,11 @@ GITHUB_MAX_BLOB_BYTES=250000
 GITHUB_MAX_FILES_PER_QUERY=80
 GITHUB_TEST_CYCLE_REPOS=4
 SOURCE_URLS=
-CHECK_TIMEOUT_SEC=4
-MAX_CONCURRENT_CHECKS=100
-MAX_VALIDATE_CANDIDATES=2500
-MAX_VALIDATE_CANDIDATES_TEST=600
+VALIDATION_MODE=tcp
+CHECK_TIMEOUT_SEC=2.5
+MAX_CONCURRENT_CHECKS=150
+MAX_VALIDATE_CANDIDATES=2000
+MAX_VALIDATE_CANDIDATES_TEST=250
 COUNTRY_WHITELIST=
 COUNTRY_BLACKLIST=RU,KP,IR
 SCHEDULE_MINUTES=15
@@ -152,7 +153,8 @@ python -m app.main run-bot
 1. Напишите боту `/start`
 2. Откроется админ-меню:
    - Статистика
-   - Обновить+Синк (сразу запускает test-cycle парсера и обновляет статистику)
+   - Обновить (только подгружает уже сохранённые данные из БД, без запуска парсера)
+   - Sync test (вручную запускает test-cycle парсера)
    - Страны
    - Топ-20
    - Очередь GitHub
@@ -170,6 +172,10 @@ python -m app.main run-bot
 Лучший сервер:
 - `/best` — лучший глобально
 - `/best RU` — лучший для страны
+
+Ручная синхронизация парсера из бота:
+- кнопка `Sync test`
+- или команда `/sync`
 
 Если репозиторий уже был:
 - бот ответит, что он уже в очереди или уже анализировался.

@@ -49,9 +49,10 @@ class AdminBot:
     def _menu(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("📊 Статистика", callback_data="stats"), InlineKeyboardButton("🔄 Обновить+Синк", callback_data="refresh")],
+                [InlineKeyboardButton("📊 Статистика", callback_data="stats"), InlineKeyboardButton("🔄 Обновить", callback_data="refresh")],
                 [InlineKeyboardButton("🌍 Страны", callback_data="countries"), InlineKeyboardButton("🧭 Топ-20", callback_data="top")],
                 [InlineKeyboardButton("📥 Очередь GitHub", callback_data="queue"), InlineKeyboardButton("📤 Export XLSX", callback_data="export")],
+                [InlineKeyboardButton("⚡ Sync test", callback_data="sync_now")],
                 [InlineKeyboardButton("🏆 Best Global", callback_data="best_global"), InlineKeyboardButton("🏳️ Best Top Country", callback_data="best_top_country")],
             ]
         )
@@ -121,6 +122,13 @@ class AdminBot:
         await update.effective_message.reply_text(
             f"🏆 Best Global: {r.proxy_type}://{r.host}:{r.port} [{r.country or '??'}] score={r.score:.1f} latency={r.latency_ms}"
         )
+
+    async def sync_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update.effective_user.id if update.effective_user else None):
+            return
+        await update.effective_message.reply_text("⏳ Запускаю test-cycle синхронизацию...")
+        stats = await self._sync_now(test_mode=True)
+        await update.effective_message.reply_html(self._render_stats() + f"\n\n✅ Sync done: validated={stats.get('validated', 0)} saved={stats.get('saved', 0)}", reply_markup=self._menu())
 
     async def export_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
@@ -262,6 +270,7 @@ def run_bot(settings: Settings) -> None:
     app = Application.builder().token(settings.telegram_bot_token).build()
     app.add_handler(CommandHandler("start", bot.start_cmd))
     app.add_handler(CommandHandler("stats", bot.stats_cmd))
+    app.add_handler(CommandHandler("sync", bot.sync_cmd))
     app.add_handler(CommandHandler("best", bot.best_cmd))
     app.add_handler(CommandHandler("export", bot.export_cmd))
     app.add_handler(CommandHandler("addrepo", bot.addrepo_cmd))

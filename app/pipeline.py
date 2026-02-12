@@ -120,7 +120,12 @@ class Pipeline:
         logger.info("Candidates parsed: %s | prepared for validation: %s", pre_count, len(candidates))
 
         logger.info("%s async validate", _stage("ПРОВЕРКА:"))
-        validated = await validate_many(candidates, self.settings.check_timeout_sec, self.settings.max_concurrent_checks)
+        validated = await validate_many(
+            candidates,
+            self.settings.check_timeout_sec,
+            self.settings.max_concurrent_checks,
+            mode=self.settings.validation_mode,
+        )
         logger.info("Candidates validated: %s", len(validated))
 
         logger.info("%s saving to DB + geo filters", _stage("СОХРАНЕНИЕ:"))
