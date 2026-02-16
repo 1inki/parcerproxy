@@ -5,3 +5,4 @@ python-dotenv==1.0.1
 APScheduler==3.10.4
 python-telegram-bot[job-queue]==21.6
 pytest==8.3.3
+httpx-socks[asyncio]==0.9.1

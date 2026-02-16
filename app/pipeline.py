@@ -44,9 +44,11 @@ class Pipeline:
             URLListCollector(self.settings.source_urls),
         ]
 
+        # Параллельный запуск всех коллекторов через asyncio.gather
+        collector_results = await asyncio.gather(*(c.collect() for c in collectors))
         raws: list[tuple[str, str]] = []
-        for collector in collectors:
-            raws.extend(await collector.collect())
+        for result in collector_results:
+            raws.extend(result)
 
         candidates: list[ProxyCandidate] = []
         for source, text in raws:
@@ -54,12 +56,27 @@ class Pipeline:
 
         validated = await validate_many(candidates, self.settings.check_timeout_sec, self.settings.max_concurrent_checks)
 
+        # --- Параллельное гео-определение ---
+        # Собираем уникальные IP-адреса из валидированных кандидатов
+        unique_ips = {
+            item.candidate.host
+            for item in validated
+            if _is_ip(item.candidate.host)
+        }
+
+        # Запускаем гео-запросы параллельно для всех уникальных IP
+        ip_list = list(unique_ips)
+        if ip_list:
+            geo_results = await asyncio.gather(*(country_by_ip(ip) for ip in ip_list))
+            ip_to_country: dict[str, str | None] = dict(zip(ip_list, geo_results))
+        else:
+            ip_to_country = {}
+
+        # Обрабатываем результаты валидации с уже готовыми гео-данными
         saved = 0
         alive = 0
         for item in validated:
-            country = None
-            if _is_ip(item.candidate.host):
-                country = await country_by_ip(item.candidate.host)
+            country = ip_to_country.get(item.candidate.host)
 
             if self.settings.country_whitelist and country and country not in self.settings.country_whitelist:
                 continue
