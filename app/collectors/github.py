@@ -256,6 +256,10 @@ class GitHubCodeCollector(Collector):
             num_code = len(code_tasks)
             code_results = all_results[:num_code]
             repo_results = all_results[num_code:]
+            
+            # Подсчет успешных поисков кода
+            code_items_found = sum(len(r) for r in code_results if isinstance(r, list))
+            logger.info("GitHub Phase 1: Найдено %d файлов по ключевым словам", code_items_found)
 
             # --- Фаза 2: Параллельная загрузка файлов из результатов code search ---
             file_tasks = []
@@ -276,6 +280,7 @@ class GitHubCodeCollector(Collector):
 
             if file_tasks:
                 file_results = await asyncio.gather(*file_tasks, return_exceptions=True)
+                loaded_files = 0
                 for i, fr in enumerate(file_results):
                     if isinstance(fr, Exception):
                         logger.warning("Ошибка загрузки файла: %s", fr)
@@ -283,6 +288,8 @@ class GitHubCodeCollector(Collector):
                     if fr is not None:
                         # fr = (api_url, decoded_content), заменяем url на html_url source
                         out.append((file_sources[i], fr[1]))
+                        loaded_files += 1
+                logger.info("GitHub Phase 2: Успешно загружено %d файлов по коду", loaded_files)
 
             # --- Фаза 3: Собираем обнаруженные репозитории ---
             discovered_repos: set[str] = set(self.extra_repos)
@@ -295,6 +302,8 @@ class GitHubCodeCollector(Collector):
                     for item in result
                     if item.get("full_name")
                 )
+                
+            logger.info("GitHub Phase 3: Обнаружено для детального скана: %d репозиториев", len(discovered_repos))
 
             # --- Фаза 4: Параллельное глубокое сканирование репозиториев ---
             repo_scan_tasks = [
@@ -305,13 +314,17 @@ class GitHubCodeCollector(Collector):
                 repo_scan_results = await asyncio.gather(
                     *repo_scan_tasks, return_exceptions=True,
                 )
+                repo_files_found = 0
                 for result in repo_scan_results:
                     if isinstance(result, Exception):
                         logger.warning("Ошибка сканирования репозитория: %s", result)
                         continue
                     # result — это list[tuple[str, str]] от каждого репозитория
                     out.extend(result)
+                    repo_files_found += len(result)
+                logger.info("GitHub Phase 4: Извлечено %d файлов из %d репозиториев", repo_files_found, len(discovered_repos))
 
+        logger.info("Сбор из GitHub завершен. Всего загружено %d файлов.", len(out))
         return out
 
     async def _collect_repo_content(

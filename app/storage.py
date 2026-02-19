@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
@@ -44,7 +44,7 @@ class Storage:
                     latency_ms=latency_ms,
                     success_rate=1.0 if is_alive else 0.0,
                     score=self._score(is_alive, latency_ms, 1.0 if is_alive else 0.0),
-                    last_checked_at=datetime.utcnow(),
+                    last_checked_at=datetime.now(timezone.utc),
                 )
                 session.add(existing)
             else:
@@ -56,7 +56,7 @@ class Storage:
                 existing.source = source
                 existing.success_rate = new_sr
                 existing.score = self._score(is_alive, latency_ms, new_sr)
-                existing.last_checked_at = datetime.utcnow()
+                existing.last_checked_at = datetime.now(timezone.utc)
 
             session.add(
                 Observation(
@@ -69,6 +69,86 @@ class Storage:
                 )
             )
             session.commit()
+
+    def batch_upsert_proxies(self, items: list[dict]) -> int:
+        """
+        Пакетное обновление или вставка списка прокси за одну транзакцию БД.
+        items - список словарей формата:
+        {
+            "proxy_type": str,
+            "host": str,
+            "port": int,
+            "source": str,
+            "country": str | None,
+            "is_alive": bool,
+            "latency_ms": float | None
+        }
+        """
+        if not items:
+            return 0
+            
+        now_utc = datetime.now(timezone.utc)
+        
+        with Session(self.engine) as session:
+            for item in items:
+                proxy_type = item["proxy_type"]
+                host = item["host"]
+                port = item["port"]
+                source = item["source"]
+                country = item.get("country")
+                is_alive = item["is_alive"]
+                latency_ms = item["latency_ms"]
+                
+                existing = session.scalar(
+                    select(Proxy).where(
+                        Proxy.proxy_type == proxy_type,
+                        Proxy.host == host,
+                        Proxy.port == port,
+                    )
+                )
+                
+                if not existing:
+                    existing = Proxy(
+                        proxy_type=proxy_type,
+                        host=host,
+                        port=port,
+                        source=source,
+                        country=country,
+                        is_alive=is_alive,
+                        latency_ms=latency_ms,
+                        success_rate=1.0 if is_alive else 0.0,
+                        score=self._score(is_alive, latency_ms, 1.0 if is_alive else 0.0),
+                        last_checked_at=now_utc,
+                    )
+                    session.add(existing)
+                else:
+                    old_sr = existing.success_rate
+                    new_sr = (old_sr * 0.8) + (1.0 if is_alive else 0.0) * 0.2
+                    existing.is_alive = is_alive
+                    existing.latency_ms = latency_ms
+                    existing.country = country or existing.country
+                    existing.source = source
+                    existing.success_rate = new_sr
+                    existing.score = self._score(is_alive, latency_ms, new_sr)
+                    existing.last_checked_at = now_utc
+
+                # Создаем наблюдение для каждого прокси
+                session.add(
+                    Observation(
+                        proxy_type=proxy_type,
+                        host=host,
+                        port=port,
+                        is_alive=is_alive,
+                        latency_ms=latency_ms,
+                        source=source,
+                        checked_at=now_utc,
+                    )
+                )
+                
+            # Один коммит на всю пачку
+            session.commit()
+            
+        return len(items)
 
     def record_run(self, raw_sources: int, candidates: int, saved: int, alive: int) -> None:
         with Session(self.engine) as session:
@@ -106,7 +186,7 @@ class Storage:
             row.status = status
             row.note = note
             if status == "done":
-                row.last_analyzed_at = datetime.utcnow()
+                row.last_analyzed_at = datetime.now(timezone.utc)
             session.commit()
 
     def repo_queue_stats(self) -> dict[str, int]:
@@ -137,7 +217,7 @@ class Storage:
             ).all()
             latest = session.scalar(select(PipelineRun).order_by(PipelineRun.created_at.desc()).limit(1))
             obs24 = session.scalar(
-                select(func.count()).select_from(Observation).where(Observation.checked_at >= datetime.utcnow() - timedelta(hours=24))
+                select(func.count()).select_from(Observation).where(Observation.checked_at >= datetime.now(timezone.utc) - timedelta(hours=24))
             ) or 0
         return {
             "total_proxies": int(total),

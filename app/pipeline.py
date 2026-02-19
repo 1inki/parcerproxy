@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
+import time
 
 from app.collectors.github import GitHubCodeCollector
+
+logger = logging.getLogger(__name__)
 from app.collectors.url_list import URLListCollector
 from app.config import Settings
 from app.geo import country_by_ip
@@ -27,7 +31,13 @@ class Pipeline:
         self.storage.init_db()
 
     async def run_once(self) -> dict[str, int]:
+        t_start = time.perf_counter()
+        logger.info("=== Запуск цикла парсинга прокси ===")
+        
         queued_repos = self.storage.get_pending_repos(limit=100)
+        if queued_repos:
+            logger.info("Взято %d репозиториев из очереди", len(queued_repos))
+        
         for repo in queued_repos:
             self.storage.mark_repo_status(repo, "processing")
 
@@ -44,15 +54,19 @@ class Pipeline:
             URLListCollector(self.settings.source_urls),
         ]
 
-        # Параллельный запуск всех коллекторов через asyncio.gather
+        logger.info("Запуск коллекторов...")
         collector_results = await asyncio.gather(*(c.collect() for c in collectors))
         raws: list[tuple[str, str]] = []
         for result in collector_results:
             raws.extend(result)
+            
+        logger.info("Собрано %d сырых текстов. Начинаю извлечение прокси...", len(raws))
 
         candidates: list[ProxyCandidate] = []
         for source, text in raws:
             candidates.extend(parse_candidates(text, source=source))
+            
+        logger.info("Извлечено %d кандидатов. Начинаю валидацию...", len(candidates))
 
         validated = await validate_many(candidates, self.settings.check_timeout_sec, self.settings.max_concurrent_checks)
 
@@ -64,6 +78,8 @@ class Pipeline:
             if _is_ip(item.candidate.host)
         }
 
+        logger.info("Определяем геолокацию для %d уникальных IP...", len(unique_ips))
+        
         # Запускаем гео-запросы параллельно для всех уникальных IP
         ip_list = list(unique_ips)
         if ip_list:
@@ -75,6 +91,8 @@ class Pipeline:
         # Обрабатываем результаты валидации с уже готовыми гео-данными
         saved = 0
         alive = 0
+        # Подготавливаем данные для пакетной вставки/обновления
+        items_to_upsert = []
         for item in validated:
             country = ip_to_country.get(item.candidate.host)
 
@@ -83,18 +101,23 @@ class Pipeline:
             if country and country in self.settings.country_blacklist:
                 continue
 
-            self.storage.upsert_proxy(
-                proxy_type=item.candidate.proxy_type,
-                host=item.candidate.host,
-                port=item.candidate.port,
-                source=item.candidate.source,
-                country=country,
-                is_alive=item.is_alive,
-                latency_ms=item.latency_ms,
-            )
+            items_to_upsert.append({
+                "proxy_type": item.candidate.proxy_type,
+                "host": item.candidate.host,
+                "port": item.candidate.port,
+                "source": item.candidate.source,
+                "country": country,
+                "is_alive": item.is_alive,
+                "latency_ms": item.latency_ms,
+            })
+            
             saved += 1
             if item.is_alive:
                 alive += 1
+                
+        # Пакетное сохранение в БД за одну транзакцию
+        if items_to_upsert:
+            self.storage.batch_upsert_proxies(items_to_upsert)
 
         for repo in queued_repos:
             self.storage.mark_repo_status(repo, "done")
@@ -106,6 +129,12 @@ class Pipeline:
             "alive": alive,
         }
         self.storage.record_run(**stats)
+        
+        dt = time.perf_counter() - t_start
+        logger.info(
+            "=== Цикл завершен за %.2f сек. Сырых: %d | Кандидатов: %d | Сохранено: %d | Живых: %d ===",
+            dt, len(raws), len(candidates), saved, alive
+        )
         return stats
 
 
