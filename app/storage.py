@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from app.models import AppConfig, Base, Observation, PipelineRun, Proxy, RepoTask
+from app.models import Base, Observation, PipelineRun, Proxy, RepoTask
 
 
 class Storage:
@@ -124,10 +124,6 @@ class Storage:
                 stmt = stmt.where(Proxy.country.in_(countries))
             return list(session.scalars(stmt.limit(limit)).all())
 
-    def all_proxies(self) -> list[Proxy]:
-        with Session(self.engine) as session:
-            return list(session.scalars(select(Proxy)).all())
-
     def dashboard_stats(self) -> dict:
         with Session(self.engine) as session:
             total = session.scalar(select(func.count()).select_from(Proxy)) or 0
@@ -164,45 +160,3 @@ class Storage:
             return max(0.0, success_rate * 30)
         latency_score = max(0.0, 1000 - (latency_ms or 1000)) / 10
         return min(100.0, success_rate * 60 + latency_score)
-
-    # --- App Configuration Methods ---
-    def get_config(self, key: str, default: str = "") -> str:
-        with Session(self.engine) as session:
-            row = session.scalar(select(AppConfig).where(AppConfig.key == key))
-            return row.value if row else default
-
-    def set_config(self, key: str, value: str) -> None:
-        with Session(self.engine) as session:
-            row = session.scalar(select(AppConfig).where(AppConfig.key == key))
-            if row:
-                row.value = value
-            else:
-                session.add(AppConfig(key=key, value=value))
-            session.commit()
-
-    def add_country_blacklist(self, country: str) -> None:
-        country = country.upper()
-        current = self.get_config("country_blacklist", "")
-        blacklist = set(c.strip() for c in current.split(",") if c.strip())
-        blacklist.add(country)
-        self.set_config("country_blacklist", ",".join(sorted(blacklist)))
-
-    def remove_country_blacklist(self, country: str) -> None:
-        country = country.upper()
-        current = self.get_config("country_blacklist", "")
-        blacklist = set(c.strip() for c in current.split(",") if c.strip())
-        blacklist.discard(country)
-        self.set_config("country_blacklist", ",".join(sorted(blacklist)))
-
-    def get_country_blacklist(self, env_default: list[str]) -> list[str]:
-        raw = self.get_config("country_blacklist", None)
-        if raw is None:
-            return env_default
-        return [c.strip() for c in raw.split(",") if c.strip()]
-
-    def prune_dead(self) -> int:
-        from sqlalchemy import delete
-        with Session(self.engine) as session:
-            result = session.execute(delete(Proxy).where(Proxy.is_alive.is_(False)))
-            session.commit()
-            return result.rowcount
