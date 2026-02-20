@@ -35,11 +35,8 @@ def _get_reader() -> Optional[geoip2.database.Reader]:
             return None
     return _reader
 
-async def country_by_ip(ip: str) -> str | None:
-    """
-    Определяет страну по IP-адресу через локальную базу GeoLite2.
-    Функция остается асинхронной для совместимости, но работает синхронно.
-    """
+def country_by_ip(ip: str) -> str | None:
+    """Определяет страну по IP-адресу через локальную базу GeoLite2."""
     reader = _get_reader()
     if reader is None:
         return None

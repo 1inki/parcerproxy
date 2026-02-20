@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+import asyncio
 import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -22,6 +23,7 @@ class AdminBot:
         self._running = False
         self._last_run_stats: dict[str, int] = {}
         self._start_time = time.time()
+        self._last_msg_id: int | None = None
 
     def _is_admin(self, user_id: int | None) -> bool:
         return bool(user_id) and user_id == self.settings.telegram_admin_id
@@ -31,36 +33,59 @@ class AdminBot:
             [
                 [InlineKeyboardButton("📊 Статистика", callback_data="stats"), InlineKeyboardButton("🔄 Обновить", callback_data="refresh")],
                 [InlineKeyboardButton("🌍 Страны", callback_data="countries"), InlineKeyboardButton("🧭 Топ-20", callback_data="top")],
+                [InlineKeyboardButton("💾 Скачать живые (CSV)", callback_data="export")],
                 [InlineKeyboardButton("📥 Очередь GitHub", callback_data="queue")],
             ]
         )
 
-    def _render_stats(self) -> str:
-        s = self.storage.dashboard_stats()
-        countries = ", ".join(f"{x['country']}:{x['count']}" for x in s["countries_top"][:8]) or "n/a"
-        q = s["queue"]
+    async def _render_stats(self) -> str:
+        s = await asyncio.to_thread(self.storage.dashboard_stats)
         latest = s["latest_run"]
+        
+        if latest["at"] is None and self._running:
+            return "🔄 <b>Сбор данных в процессе...</b>\n\nПожалуйста, дождитесь окончания первого цикла (около 1-3 минут)."
+        elif latest["at"] is None:
+             return "💤 <b>Парсер ожидает запуска.</b>\n\nВ базе пока нет данных. Нажмите /force_run или дождитесь расписания."
+
+        countries = ", ".join(f"{x['country']}:{x['count']}" for x in s["countries_top"][:8]) or "Нет данных"
+        q = s["queue"]
+        
         return (
-            "<b>Proxy Parser Dashboard</b>\n"
-            f"Всего прокси: <b>{s['total_proxies']}</b>\n"
-            f"Живых: <b>{s['alive_proxies']}</b>\n"
-            f"Очередь repos — pending:{q['pending']} processing:{q['processing']} done:{q['done']} failed:{q['failed']}\n"
-            f"Последний цикл: sources={latest['raw_sources']} candidates={latest['candidates']} saved={latest['saved']} alive={latest['alive']}\n"
-            f"Топ стран: {countries}"
+            "📊 <b>Proxy Parser Dashboard</b>\n\n"
+            f"⚡️ Всего прокси: <b>{s['total_proxies']}</b>\n"
+            f"✅ Живых: <b>{s['alive_proxies']}</b>\n\n"
+            f"📥 <b>Очередь GitHub:</b>\n"
+            f"⏳ Pending: {q['pending']} | 🔄 Proc: {q['processing']} | ✅ Done: {q['done']} | ❌ Fail: {q['failed']}\n\n"
+            f"🔄 <b>Последний цикл:</b>\n"
+            f"Sources: {latest['raw_sources']} | Cand: {latest['candidates']} | Saved: {latest['saved']} | Alive: {latest['alive']}\n\n"
+            f"🌍 Топ стран: {countries}"
         )
+
+    async def _send_new_dashboard(self, chat_id: int, context: ContextTypes.DEFAULT_TYPE, text: str, markup) -> None:
+        if self._last_msg_id:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=self._last_msg_id)
+            except Exception:
+                pass
+        msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=markup)
+        self._last_msg_id = msg.message_id
 
     async def start_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
             return
-        await update.effective_message.reply_text(
-            "Админ-панель парсера. Можно отправить GitHub ссылку для постановки в очередь.",
-            reply_markup=self._menu(),
+        chat_id = update.effective_chat.id if update.effective_chat else self.settings.telegram_admin_id
+        await self._send_new_dashboard(
+            chat_id, context,
+            "👋 <b>Админ-панель парсера</b>\n\nОтправьте мне ссылку на GitHub репозиторий, чтобы добавить его в очередь на скан, или используйте меню ниже.",
+            self._menu()
         )
 
     async def stats_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
             return
-        await update.effective_message.reply_html(self._render_stats(), reply_markup=self._menu())
+        chat_id = update.effective_chat.id if update.effective_chat else self.settings.telegram_admin_id
+        stats_text = await self._render_stats()
+        await self._send_new_dashboard(chat_id, context, stats_text, self._menu())
 
     async def addrepo_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
@@ -84,7 +109,7 @@ class AdminBot:
             await update.effective_message.reply_text("Не нашёл корректный GitHub repo URL.")
             return
         repo = m.group(1).rstrip("/").lower()
-        created, reason = self.storage.enqueue_repo(repo, note="from_telegram_admin")
+        created, reason = await asyncio.to_thread(self.storage.enqueue_repo, repo, "from_telegram_admin")
         if created:
             await update.effective_message.reply_text(f"✅ Репозиторий {repo} добавлен в очередь.")
         elif reason == "already_analyzed":
@@ -102,21 +127,48 @@ class AdminBot:
 
         data = query.data or ""
         if data in {"stats", "refresh"}:
-            await query.edit_message_text(self._render_stats(), parse_mode="HTML", reply_markup=self._menu())
+            stats_text = await self._render_stats()
+            await query.edit_message_text(stats_text, parse_mode="HTML", reply_markup=self._menu())
         elif data == "countries":
-            s = self.storage.dashboard_stats()
+            s = await asyncio.to_thread(self.storage.dashboard_stats)
             text = "\n".join(f"{x['country']}: {x['count']}" for x in s["countries_top"]) or "Нет данных"
             await query.edit_message_text(f"🌍 Страны (top):\n{text}", reply_markup=self._menu())
         elif data == "queue":
-            q = self.storage.repo_queue_stats()
+            q = await asyncio.to_thread(self.storage.repo_queue_stats)
             await query.edit_message_text(
                 f"📥 Очередь\npending: {q['pending']}\nprocessing: {q['processing']}\ndone: {q['done']}\nfailed: {q['failed']}",
                 reply_markup=self._menu(),
             )
         elif data == "top":
-            rows = self.storage.top_alive(limit=20)
+            rows = await asyncio.to_thread(self.storage.top_alive, 20)
             lines = [f"{idx+1}. {r.proxy_type}://{r.host}:{r.port} [{r.country or '??'}] score={r.score:.1f}" for idx, r in enumerate(rows)]
             await query.edit_message_text("🧭 Топ-20 живых:\n" + ("\n".join(lines) or "Нет данных"), reply_markup=self._menu())
+        elif data == "export":
+            import csv
+            import io
+            rows = await asyncio.to_thread(self.storage.top_alive, 10000)
+            if not rows:
+                await query.answer("Нет живых прокси для экспорта.", show_alert=True)
+                return
+            
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(["proxy_type", "host", "port", "country", "latency_ms", "score"])
+            for r in rows:
+                writer.writerow([r.proxy_type, r.host, r.port, r.country or "Unknown", f"{r.latency_ms:.1f}" if r.latency_ms else "", f"{r.score:.1f}"])
+            
+            output.seek(0)
+            buf = io.BytesIO(output.getvalue().encode('utf-8'))
+            buf.name = "proxies.csv"
+            
+            if query.message:
+                await context.bot.send_document(
+                    chat_id=query.message.chat.id,
+                    document=buf,
+                    filename="proxies.csv",
+                    caption=f"✅ Экспорт завершен. В файле {len(rows)} рабочих прокси."
+                )
+            await query.answer()
 
     async def force_run_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_admin(update.effective_user.id if update.effective_user else None):
@@ -125,14 +177,61 @@ class AdminBot:
             await update.effective_message.reply_text("⚠️ Ошибка: цикл парсинга уже запущен!")
             return
             
-        await update.effective_message.reply_text("⏳ Запускаю принудительный цикл...")
         self._running = True
         try:
+            await update.effective_message.reply_text("⏳ Запускаю принудительный цикл...")
             pipeline = Pipeline(self.settings)
-            stats = await pipeline.run_once()
+            stats = await pipeline.run_once(test_mode=False)
             self._last_run_stats = stats
             await update.effective_message.reply_text(
-                f"✅ Цикл завершён: {stats.get('alive', 0)} alive из {stats.get('candidates', 0)} кандидатов, {stats.get('saved', 0)} сохранено"
+                f"✅ Цикл завершён!\n\n"
+                f"🔍 Проверено кандидатов: {stats.get('candidates', 0)}\n"
+                f"💾 Записано в базу (включая нерабочие для истории): {stats.get('saved', 0)}\n"
+                f"🟢 Рабочих прокси найдено: {stats.get('alive', 0)}"
+            )
+        finally:
+            self._running = False
+
+    async def test_run_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update.effective_user.id if update.effective_user else None):
+            return
+        if self._running:
+            await update.effective_message.reply_text("⚠️ Ошибка: парсер сейчас занят!")
+            return
+            
+        self._running = True
+        try:
+            await update.effective_message.reply_text("🚀 Запускаю БЫСТРЫЙ тестовый цикл (лимит до 5 страниц)...")
+            pipeline = Pipeline(self.settings)
+            stats = await pipeline.run_once(test_mode=True)
+            self._last_run_stats = stats
+            await update.effective_message.reply_text(
+                f"✅ Тестовый цикл завершён!\n\n"
+                f"🔍 Проверено кандидатов: {stats.get('candidates', 0)}\n"
+                f"💾 Записано в базу (включая нерабочие для истории): {stats.get('saved', 0)}\n"
+                f"🟢 Рабочих прокси найдено: {stats.get('alive', 0)}"
+            )
+        finally:
+            self._running = False
+
+    async def fast_test_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_admin(update.effective_user.id if update.effective_user else None):
+            return
+        if self._running:
+            await update.effective_message.reply_text("⚠️ Ошибка: парсер сейчас занят!")
+            return
+            
+        self._running = True
+        try:
+            await update.effective_message.reply_text("⚡️ Запускаю МОЛНИЕНОСНЫЙ тестовый цикл (только 2 источника URLs)...")
+            pipeline = Pipeline(self.settings)
+            stats = await pipeline.run_once(fast_test=True)
+            self._last_run_stats = stats
+            await update.effective_message.reply_text(
+                f"✅ Молниеносный тест завершён!\n\n"
+                f"🔍 Проверено кандидатов: {stats.get('candidates', 0)}\n"
+                f"💾 Записано в базу: {stats.get('saved', 0)}\n"
+                f"🟢 Рабочих прокси найдено: {stats.get('alive', 0)}"
             )
         finally:
             self._running = False
@@ -181,18 +280,28 @@ class AdminBot:
     async def periodic_report(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         if self.settings.telegram_admin_id <= 0:
             return
-        await context.bot.send_message(chat_id=self.settings.telegram_admin_id, text=self._render_stats(), parse_mode="HTML", reply_markup=self._menu())
+        stats_text = await self._render_stats()
+        await self._send_new_dashboard(self.settings.telegram_admin_id, context, stats_text, self._menu())
 
 
 def run_bot(settings: Settings) -> None:
     if not settings.telegram_bot_token or settings.telegram_admin_id <= 0:
         raise RuntimeError("Set TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_ID in .env")
 
+    # Set up a new active event loop
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     bot = AdminBot(settings)
     app = Application.builder().token(settings.telegram_bot_token).build()
     app.add_handler(CommandHandler("start", bot.start_cmd))
     app.add_handler(CommandHandler("stats", bot.stats_cmd))
     app.add_handler(CommandHandler("addrepo", bot.addrepo_cmd))
+    app.add_handler(CommandHandler("test_run", bot.test_run_cmd))
+    app.add_handler(CommandHandler("fast_test", bot.fast_test_cmd))
     app.add_handler(CallbackQueryHandler(bot.callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.text_handler))
     app.job_queue.run_repeating(bot.periodic_report, interval=settings.telegram_report_minutes * 60, first=15)
@@ -202,6 +311,13 @@ def run_all_in_one(settings: Settings) -> None:
     if not settings.telegram_bot_token or settings.telegram_admin_id <= 0:
         raise RuntimeError("Set TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_ID in .env")
 
+    # Set up a new active event loop for telegram
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     bot = AdminBot(settings)
     app = Application.builder().token(settings.telegram_bot_token).build()
     
@@ -209,6 +325,8 @@ def run_all_in_one(settings: Settings) -> None:
     app.add_handler(CommandHandler("stats", bot.stats_cmd))
     app.add_handler(CommandHandler("addrepo", bot.addrepo_cmd))
     app.add_handler(CommandHandler("force_run", bot.force_run_cmd))
+    app.add_handler(CommandHandler("test_run", bot.test_run_cmd))
+    app.add_handler(CommandHandler("fast_test", bot.fast_test_cmd))
     app.add_handler(CommandHandler("status", bot.status_cmd))
     app.add_handler(CallbackQueryHandler(bot.callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.text_handler))

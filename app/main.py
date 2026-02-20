@@ -44,7 +44,11 @@ def setup_logging(log_file: str = "parser.log", level: str = "INFO") -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Proxy intelligence pipeline")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("run-once", help="Run one collection cycle")
+    
+    cmd_run_once = sub.add_parser("run-once", help="Run one collection cycle")
+    cmd_run_once.add_argument("--test", action="store_true", help="Run in test mode")
+    cmd_run_once.add_argument("--fast-test", action="store_true", help="Run in fast test mode")
+    
     sub.add_parser("daemon", help="Run continuously with scheduler")
     sub.add_parser("run-bot", help="Run Telegram admin bot")
     sub.add_parser("all-in-one", help="Run bot + scheduler in one process")
@@ -59,7 +63,7 @@ def main() -> None:
 
     if args.cmd == "run-once":
         logger.info("Запуск единичного цикла парсинга.")
-        stats = run_once_sync(settings)
+        stats = run_once_sync(settings, test_mode=getattr(args, "test", False), fast_test=getattr(args, "fast_test", False))
         logger.info("Цикл завершен. Статистика: %s", json.dumps(stats, ensure_ascii=False))
     elif args.cmd == "daemon":
         run_daemon(settings)

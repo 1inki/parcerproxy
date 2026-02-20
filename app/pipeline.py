@@ -30,29 +30,41 @@ class Pipeline:
         self.storage = Storage(settings.db_url)
         self.storage.init_db()
 
-    async def run_once(self) -> dict[str, int]:
+    async def run_once(self, test_mode: bool = False, fast_test: bool = False) -> dict[str, int]:
         t_start = time.perf_counter()
-        logger.info("=== Запуск цикла парсинга прокси ===")
+        mode_str = "(FAST TEST)" if fast_test else ("(TEST MODE)" if test_mode else "")
+        logger.info(f"=== Запуск цикла парсинга прокси {mode_str} ===")
         
-        queued_repos = self.storage.get_pending_repos(limit=100)
+        queued_repos = await asyncio.to_thread(self.storage.get_pending_repos, 100)
+        if fast_test:
+            queued_repos = queued_repos[:1]
+        elif test_mode:
+            queued_repos = queued_repos[:5]
+            
         if queued_repos:
             logger.info("Взято %d репозиториев из очереди", len(queued_repos))
         
         for repo in queued_repos:
-            self.storage.mark_repo_status(repo, "processing")
+            await asyncio.to_thread(self.storage.mark_repo_status, repo, "processing")
 
-        collectors = [
-            GitHubCodeCollector(
-                token=self.settings.github_token,
-                queries=self.settings.github_queries,
-                code_pages=self.settings.github_code_pages,
-                repo_pages=self.settings.github_repo_pages,
-                per_page=self.settings.github_per_page,
-                max_blob_bytes=self.settings.github_max_blob_bytes,
-                extra_repos=queued_repos,
-            ),
-            URLListCollector(self.settings.source_urls),
-        ]
+        collectors = []
+        if not fast_test:
+            collectors.append(
+                GitHubCodeCollector(
+                    token=self.settings.github_token,
+                    queries=self.settings.github_queries[:1] if test_mode else self.settings.github_queries,
+                    code_pages=1 if test_mode else self.settings.github_code_pages,
+                    repo_pages=1 if test_mode else self.settings.github_repo_pages,
+                    per_page=3 if test_mode else self.settings.github_per_page,
+                    max_blob_bytes=self.settings.github_max_blob_bytes,
+                    extra_repos=queued_repos,
+                )
+            )
+        
+        # Если это fast_test и кастомных урлов нет, добавим один для гарантии получения прокси
+        test_urls = self.settings.source_urls[:2] if self.settings.source_urls else ["https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"]
+        
+        collectors.append(URLListCollector(test_urls if fast_test else self.settings.source_urls))
 
         logger.info("Запуск коллекторов...")
         collector_results = await asyncio.gather(*(c.collect() for c in collectors))
@@ -60,11 +72,15 @@ class Pipeline:
         for result in collector_results:
             raws.extend(result)
             
+        if fast_test:
+            raws = raws[:3]
+            
         logger.info("Собрано %d сырых текстов. Начинаю извлечение прокси...", len(raws))
 
         candidates: list[ProxyCandidate] = []
         for source, text in raws:
-            candidates.extend(parse_candidates(text, source=source))
+            parsed = await asyncio.to_thread(parse_candidates, text, source)
+            candidates.extend(parsed)
             
         logger.info("Извлечено %d кандидатов. Начинаю валидацию...", len(candidates))
 
@@ -80,10 +96,13 @@ class Pipeline:
 
         logger.info("Определяем геолокацию для %d уникальных IP...", len(unique_ips))
         
-        # Запускаем гео-запросы параллельно для всех уникальных IP
+        # Запускаем гео-запросы параллельно для всех уникальных IP в потоке
         ip_list = list(unique_ips)
         if ip_list:
-            geo_results = await asyncio.gather(*(country_by_ip(ip) for ip in ip_list))
+            loop = asyncio.get_running_loop()
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                geo_results = await loop.run_in_executor(pool, lambda: list(pool.map(country_by_ip, ip_list)))
             ip_to_country: dict[str, str | None] = dict(zip(ip_list, geo_results))
         else:
             ip_to_country = {}
@@ -96,8 +115,10 @@ class Pipeline:
         for item in validated:
             country = ip_to_country.get(item.candidate.host)
 
-            if self.settings.country_whitelist and country and country not in self.settings.country_whitelist:
-                continue
+            if self.settings.country_whitelist:
+                if not country or country not in self.settings.country_whitelist:
+                    continue
+            
             if country and country in self.settings.country_blacklist:
                 continue
 
@@ -115,12 +136,12 @@ class Pipeline:
             if item.is_alive:
                 alive += 1
                 
-        # Пакетное сохранение в БД за одну транзакцию
+        # Пакетное сохранение в БД за одну транзакцию в отдельном потоке
         if items_to_upsert:
-            self.storage.batch_upsert_proxies(items_to_upsert)
+            await asyncio.to_thread(self.storage.batch_upsert_proxies, items_to_upsert)
 
         for repo in queued_repos:
-            self.storage.mark_repo_status(repo, "done")
+            await asyncio.to_thread(self.storage.mark_repo_status, repo, "done")
 
         stats = {
             "raw_sources": len(raws),
@@ -128,7 +149,7 @@ class Pipeline:
             "saved": saved,
             "alive": alive,
         }
-        self.storage.record_run(**stats)
+        await asyncio.to_thread(self.storage.record_run, **stats)
         
         dt = time.perf_counter() - t_start
         logger.info(
@@ -138,5 +159,5 @@ class Pipeline:
         return stats
 
 
-def run_once_sync(settings: Settings) -> dict[str, int]:
-    return asyncio.run(Pipeline(settings).run_once())
+def run_once_sync(settings: Settings, test_mode: bool = False, fast_test: bool = False) -> dict[str, int]:
+    return asyncio.run(Pipeline(settings).run_once(test_mode=test_mode, fast_test=fast_test))

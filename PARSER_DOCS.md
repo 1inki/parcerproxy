@@ -116,32 +116,32 @@ Pipeline внутри использует:
 ## Структура файлов
 
 ```
-parcerproxy/
-├── .env.example          # Шаблон переменных окружения
-├── requirements.txt      # Python-зависимости
-├── README.md             # Краткое описание
-├── app/
-│   ├── __init__.py       # Пустой, маркер пакета
-│   ├── main.py           # CLI точка входа (argparse)
-│   ├── config.py         # Dataclass Settings + загрузка .env
-│   ├── models.py         # SQLAlchemy ORM модели (4 таблицы)
-│   ├── collectors/
-│   │   ├── base.py       # ABC Collector (интерфейс)
-│   │   ├── github.py     # GitHubCodeCollector (глубокий поиск)
-│   │   └── url_list.py   # URLListCollector (простой HTTP GET)
-│   ├── normalizer.py     # Regex-парсинг прокси из текста
-│   ├── validator.py      # Async проверка живучести прокси
-│   ├── geo.py            # Определение страны по IP (ipapi.co)
-│   ├── pipeline.py       # Главный конвейер: collect → parse → validate → save
-│   ├── storage.py        # Слой работы с БД (upsert, stats, queue)
-│   ├── scheduler.py      # APScheduler daemon-режим
-│   ├── service.py        # Сервисный слой (прослойка перед API)
-│   └── bot.py            # Telegram admin-бот (меню, команды, отчёты)
-└── tests/
-└── tests/
-    ├── test_normalizer_extended.py # Расширенное тестирование regex и парсинга (в т.ч. Base64)
-    ├── test_validator_routing.py   # Тест маршрутизации HTTP/SOCKS/TCP через mock
-    └── test_geo_cache.py           # Проверка инициализации локальной базы GeoLite2
+ parcerproxy/
+ ├── .env.example          # Шаблон переменных окружения
+ ├── requirements.txt      # Python-зависимости (вкл. httpx-socks)
+ ├── README.md             # Краткое описание
+ ├── GeoLite2-Country.mmdb # Локальная база GeoIP (необходимо скачать)
+ ├── app/
+ │   ├── __init__.py       # Пустой, маркер пакета
+ │   ├── main.py           # CLI точка входа (argparse) + флаги --test, --fast-test
+ │   ├── config.py         # Dataclass Settings + загрузка .env
+ │   ├── models.py         # SQLAlchemy ORM модели (4 таблицы)
+ │   ├── collectors/
+ │   │   ├── base.py       # ABC Collector (интерфейс)
+ │   │   ├── github.py     # GitHubCodeCollector (параллельный поиск, rate-limit retry)
+ │   │   └── url_list.py   # URLListCollector (простой HTTP GET)
+ │   ├── normalizer.py     # Regex-парсинг прокси (с поддержкой ss://, vmess://, JSON)
+ │   ├── validator.py      # Async проверка живучести (HTTP/SOCKS/TCP)
+ │   ├── geo.py            # Локальное GeoIP определение (GeoLite2 Reader)
+ │   ├── pipeline.py       # Главный конвейер с batch ops и geo-filtering
+ │   ├── storage.py        # Слой работы с БД (batch_upsert, stats, queue)
+ │   ├── scheduler.py      # APScheduler daemon-режим
+ │   ├── service.py        # Сервисный слой
+ │   └── bot.py            # Telegram admin-бот
+ └── tests/
+     ├── test_normalizer_extended.py # Тест расширенного парсинга
+     ├── test_validator_routing.py   # Тест маршрутизации протоколов
+     └── test_geo_cache.py           # Тест локального GeoIP (синхронный)
 ```
 
 ---
@@ -436,9 +436,13 @@ async with httpx.AsyncClient(proxy=proxy_url, timeout=timeout_sec) as client:
     latency = (time.perf_counter() - t0) * 1000
 ```
 
-- **Целевые URL:** Запросы перебирают `https://httpbin.org/ip`, `https://ifconfig.me/ip`, `https://api.ipify.org`, `https://icanhazip.com`, `https://checkip.amazonaws.com` (fallback-цепочка).
-- **Критерий живучести:** HTTP/TCP успешное подключение и status < 500 для HTTP-прокси.
-- **Замер latency:** `time.perf_counter()` в миллисекундах
+- **Целевые URL:** Запросы перебирают `https://httpbin.org/ip`, `https://ifconfig.me/ip`, `https://api.ipify.org`, `https://icanhazip.com`, `https://checkip.amazonaws.com`.
+- **Протоколы:**
+  - `HTTP/HTTPS`: Стандартная проверка.
+  - `SOCKS4/5`: Через `httpx-socks`.
+  - `MTProto/Shadowsocks`: Проверка TCP-подключения (open_connection).
+- **Критерий живучести:** Успешный ответ для HTTP или успешное TCP-соединение для двоичных протоколов.
+- **Замер latency:** `time.perf_counter()` в миллисекундах.
 - При любом исключении → `is_alive=False, latency_ms=None`
 
 ### Функция `validate_many(candidates, timeout_sec, max_concurrent)`
@@ -775,9 +779,11 @@ python -m app.main all-in-one  # Бот и Планировщик работаю
 
 | Команда | Вызывает | Описание |
 |---------|----------|----------|
-| `run-once` | `run_once_sync(settings)` | Один проход, результат в JSON |
-| `daemon` | `run_daemon(settings)` | BlockingScheduler + interval |
-| `run-bot` | `run_bot(settings)` | Long-polling Telegram-бот |
+| `run-once` | `run_once_sync` | Один проход. Опционально: `--test`, `--fast-test` |
+| `--test` | - | Лимит: 5 репозиториев для теста |
+| `--fast-test` | - | Лимит: 1 репозиторий + тестовый URL (макс. скорость) |
+| `daemon` | `run_daemon` | BlockingScheduler + интервал |
+| `run-bot` | `run_bot` | Long-polling Telegram-бот |
 
 ---
 
