@@ -47,9 +47,9 @@ python -m app.main all-in-one               # Бот + Парсер в одно�
 - `GITHUB_MAX_BLOB_BYTES`
 
 ## Тестирование
-Для запуска тестов установите зависимости из `requirements-dev.txt` и запустите pytest:
+Для запуска тестов установите зависимости из `requirements.txt` и запустите pytest:
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements.txt
 pytest tests/ -v
 ```
 
