@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+import logging
 from dataclasses import dataclass
 
-import httpx
-
 from app.normalizer import ProxyCandidate
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -16,26 +17,59 @@ class ValidationResult:
     latency_ms: float | None
 
 
-async def _check(candidate: ProxyCandidate, timeout_sec: float) -> ValidationResult:
-    # Универсальная быстрая проверка TCP-like доступности через HTTP endpoint.
-    # Для socks/mtproto/ss это индикативно, не полная функциональная проверка протокола.
+import requests
+from concurrent.futures import ThreadPoolExecutor
+
+def _check_sync(candidate: ProxyCandidate, timeout_sec: float) -> ValidationResult:
     proxy_url = f"{candidate.proxy_type}://{candidate.host}:{candidate.port}"
-    t0 = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(proxy=proxy_url, timeout=timeout_sec, follow_redirects=True) as client:
-            r = await client.get("https://httpbin.org/ip")
-            ok = r.status_code < 500
-            dt = (time.perf_counter() - t0) * 1000
-            return ValidationResult(candidate=candidate, is_alive=ok, latency_ms=dt)
-    except Exception:
-        return ValidationResult(candidate=candidate, is_alive=False, latency_ms=None)
+    proxies = {
+        "http": proxy_url,
+        "https": proxy_url
+    }
+    
+    for attempt in range(2):
+        t0 = time.perf_counter()
+        try:
+            # Using requests inside a thread completely bypasses asyncio OS-level socket bugs on Windows
+            r = requests.get("http://1.1.1.1/cdn-cgi/trace", proxies=proxies, timeout=timeout_sec, verify=False)
+            if r.status_code < 400:
+                dt = (time.perf_counter() - t0) * 1000
+                return ValidationResult(candidate=candidate, is_alive=True, latency_ms=dt)
+        except Exception:
+            pass
+        if attempt == 0:
+            time.sleep(0.5)
+
+    return ValidationResult(candidate=candidate, is_alive=False, latency_ms=None)
 
 
 async def validate_many(candidates: list[ProxyCandidate], timeout_sec: float, max_concurrent: int) -> list[ValidationResult]:
-    sem = asyncio.Semaphore(max_concurrent)
+    if not candidates:
+        return []
 
-    async def run_one(c: ProxyCandidate) -> ValidationResult:
-        async with sem:
-            return await _check(c, timeout_sec)
+    total = len(candidates)
+    results: list[ValidationResult] = []
+    done = 0
 
-    return await asyncio.gather(*(run_one(c) for c in candidates))
+    # Ensure max_concurrent is reasonable for threads
+    threads = min(max_concurrent, 200)
+
+    loop = asyncio.get_running_loop()
+    
+    logger.info("Starting validation using ThreadPoolExecutor with %d threads", threads)
+
+    # Use ThreadPoolExecutor to completely isolate blocking socket operations from asyncio loop
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        fs = [loop.run_in_executor(executor, _check_sync, c, timeout_sec) for c in candidates]
+        
+        # We await them as they complete to report progress without blocking
+        for i, coro in enumerate(asyncio.as_completed(fs)):
+            res = await coro
+            results.append(res)
+            
+            done += 1
+            if done % max(1, total // 10) == 0 or done == total:
+                logger.info("Validation progress: %d/%d (%.1f%%) done", done, total, (done / total) * 100)
+                await asyncio.sleep(0.01) # Breathe
+                
+    return results
